@@ -13,6 +13,12 @@ npm run dev
 
 打开终端打印的本地地址。`npm run build` 生成 Cloudflare Workers 部署文件。
 
+## GitHub Pages
+
+仓库包含 `.github/workflows/pages.yml`。将仓库的 Pages 来源设置为 **GitHub Actions** 后，推送到 `main` 会自动构建并发布静态前端。
+
+Pages 版本不会把 API 密钥写入仓库：用户在页面中输入自己的 OpenRouter 密钥，浏览器直接请求 OpenRouter 的 `novita` 端点。密钥只保留在当前页面内存；请勿把密钥提交到代码、Issue 或构建日志中。
+
 ## 功能
 
 - 文字生图、提示词画幅指引
