@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { downloadImage, downloadZip } from "@/lib/download";
+import { checkFreeProvider, IMAGE_API, MODELS, providerError } from "@/lib/ming";
 
 type Mode = "generate" | "layers";
 type OutputImage = {url: string; filename: string; width: number; height: number; alpha: boolean; label?: string};
@@ -15,8 +16,51 @@ type Source = {url: string; name: string; width: number; height: number};
 const initialPrompt = `一张高冲击力、专业商业摄影风格的无线耳机电商信息图。竖版画幅，产品清晰锐利，浅景深。\n前景：一只手把打开的光滑白色充电盒举向镜头，盒内两只白色耳机带黑色扬声器，正面绿色 LED。\n中景：有雀斑、粉色波浪头发的微笑年轻女性，酸橙绿针织帽，黑白条纹长袖衬衫，耳朵戴白色耳机。\n背景：浅灰渐变影棚、对角线彩虹棱镜光晕、柔和漏光，几只虚化的白色耳机漂浮。\n白色无衬线排版：顶部巨大 AIRPODS 在模特后方；右上 Apple Pods Pro 3；中左“优质音效与降噪”；中右大号“30”及“小时的电池续航。”；右下大号“1”及“年保修。”。\n保持精致构图、真实产品质感、鲜艳但协调的配色。`;
 const initialRoles = `1. 所有广告文字与数字\n2. 前景手、充电盒、盒内耳机与 LED\n3. 模特的脸、皮肤、雀斑与五官\n4. 模特的头发、帽子、衬衫与佩戴的耳机\n5. 背景中漂浮的白色耳机\n6. 背景、彩虹光晕与漏光`;
 const labels = ["文字与数字", "手与充电盒", "模特头部", "模特与服饰", "漂浮耳机", "背景与光效"];
-const sampleDesign: Result = {images: [{url: "/examples/earbuds-design.png", filename: "ming-design.png", width: 1440, height: 2560, alpha: false}], elapsed: 36.959, cost: 0, sample: true};
-const sampleLayers: Result = {images: labels.map((label, i) => ({url: `/examples/earbuds-layer-${i+1}.png`, filename: `layer-${String(i+1).padStart(2,"0")}.png`, width:768, height:1365, alpha:true, label})), elapsed:54.229, cost:0, sample:true};
+const sampleDesign: Result = {images: [{url: "examples/earbuds-design.png", filename: "ming-design.png", width: 1440, height: 2560, alpha: false}], elapsed: 36.959, cost: 0, sample: true};
+const sampleLayers: Result = {images: labels.map((label, i) => ({url: `examples/earbuds-layer-${i+1}.png`, filename: `layer-${String(i+1).padStart(2,"0")}.png`, width:768, height:1365, alpha:true, label})), elapsed:54.229, cost:0, sample:true};
+
+const staticDeployment = typeof window !== "undefined" &&
+  (window.location.hostname.endsWith(".github.io") || window.location.pathname.startsWith("/ming-image-studio"));
+
+type ImageResponse = {error?: string; images: {b64: string; filename: string; width: number; height: number; alpha: boolean}[]; elapsed: number; cost: number | null};
+
+async function requestStaticImages(task: Mode, prompt: string, image: string | undefined, key: string): Promise<ImageResponse> {
+  const model = MODELS[task];
+  const provider = await checkFreeProvider(model);
+  const payload: Record<string, unknown> = {model, prompt, output_format: "png", provider: {only: [provider], allow_fallbacks: false}};
+  if (task === "layers") payload.input_references = [{type: "image_url", image_url: {url: image}}];
+  const started = Date.now();
+  const response = await fetch(IMAGE_API, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": window.location.href,
+      "X-Title": "Ming Image Studio",
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(600000),
+  });
+  if (!response.ok) throw new Error(providerError(response.status));
+  let data: {error?: {code?: unknown}; data?: {b64_json?: unknown}[]; usage?: {cost?: unknown; cost_usd?: unknown}};
+  try {data = await response.json();} catch {throw new Error("模型没有返回有效的图片数据，请稍后重试。");}
+  if (data.error) throw new Error(providerError(Number(data.error.code) || 502));
+  if (!Array.isArray(data.data) || !data.data.length || data.data.length > 9) throw new Error("模型未返回可用图片，请到 OpenRouter 查看请求记录。");
+  const images = data.data.map((item, index) => {
+    const b64 = item.b64_json;
+    if (typeof b64 !== "string" || b64.length < 44 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64) || b64.length % 4 !== 0) throw new Error("模型返回了无效图片。");
+    const first = atob(b64.slice(0, 44));
+    const bytes = Uint8Array.from(first, c => c.charCodeAt(0));
+    if (bytes[0] !== 137 || first.slice(1, 8) !== "PNG\r\n\x1a\n" || first.slice(12, 16) !== "IHDR") throw new Error("模型返回的不是有效 PNG。");
+    const view = new DataView(bytes.buffer);
+    const width = view.getUint32(16), height = view.getUint32(20);
+    if (width < 1 || height < 1 || width > 16384 || height > 16384) throw new Error("模型返回了无效图片尺寸。");
+    return {b64, width, height, alpha: [4, 6].includes(bytes[25]), filename: `${task === "layers" ? "layer" : "design"}-${String(index + 1).padStart(2, "0")}.png`};
+  });
+  const reportedCost = data.usage?.cost ?? data.usage?.cost_usd;
+  const cost = (typeof reportedCost === "number" || (typeof reportedCost === "string" && reportedCost.trim() !== "")) && Number.isFinite(Number(reportedCost)) ? Number(reportedCost) : null;
+  return {images, elapsed: (Date.now() - started) / 1000, cost};
+}
 
 function readImage(url: string): Promise<{width: number; height: number}> {
   return new Promise((resolve, reject) => {
@@ -124,10 +168,15 @@ export default function Studio() {
     try {
       const fullPrompt = task === "generate" ? `${prompt.trim()}${ratio === "auto" ? "" : `\n画幅比例：${ratio}。`}` : `请将输入图片拆分为 ${count} 张独立透明 RGBA PNG 图层。严格保留原图画布坐标、比例、排版位置、颜色、光影和元素外观。不要改字或添加新元素。\n按以下语义角色拆分：\n${roles}\n每层只保留对应角色，其余区域使用真正透明 alpha。保留自然边缘，避免白边、黑边、背景残留与元素重复。所有输出图层使用完全相同的画布尺寸，便于叠加编辑。`;
       const input = task === "layers" ? await asDataUrl(source!.url) : undefined;
-      const response = await fetch("/api/images", {method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${key}`},body:JSON.stringify({task,prompt:fullPrompt,image:input}),signal:AbortSignal.timeout(600000)});
-      if (!(response.headers.get("content-type")??"").includes("application/json")) throw new Error("服务暂时未就绪，请稍后重试。");
-      const data = await response.json() as {error?:string;images:{b64:string;filename:string;width:number;height:number;alpha:boolean}[];elapsed:number;cost:number|null};
-      if(!response.ok || data.error) throw new Error(data.error || "请求失败，请稍后重试。");
+      let data: ImageResponse;
+      if (staticDeployment) {
+        data = await requestStaticImages(task, fullPrompt, input, key);
+      } else {
+        const response = await fetch("/api/images", {method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${key}`},body:JSON.stringify({task,prompt:fullPrompt,image:input}),signal:AbortSignal.timeout(600000)});
+        if (!(response.headers.get("content-type")??"").includes("application/json")) throw new Error("服务暂时未就绪，请稍后重试。");
+        data = await response.json() as ImageResponse;
+        if(!response.ok || data.error) throw new Error(data.error || "请求失败，请稍后重试。");
+      }
       const images: OutputImage[] = data.images.map((img: {b64:string;filename:string;width:number;height:number;alpha:boolean}) => {
         const binary=atob(img.b64), bytes=new Uint8Array(binary.length);
         for(let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
@@ -190,7 +239,7 @@ export default function Studio() {
       </Tabs>
       <footer className="studio-footer"><span>密钥仅保留在当前页面内存，刷新后清除。</span><div className="flex gap-5"><a href="https://openrouter.ai/inclusionai/ming-image-0.1-design" target="_blank" rel="noreferrer">Design 模型 ↗</a><a href="https://openrouter.ai/inclusionai/ming-image-0.1-design-layer" target="_blank" rel="noreferrer">Design-Layer 模型 ↗</a></div></footer>
     </main>
-    <Dialog open={keyOpen} onOpenChange={open=>{setKeyOpen(open);if(!open){pendingAction.current=null;setKeyDraft("");}}}><DialogContent><DialogHeader><DialogTitle>连接 OpenRouter</DialogTitle><DialogDescription className="leading-6">输入你的 OpenRouter API 密钥。密钥只用于本次会话，并通过本站服务端转发到 OpenRouter。</DialogDescription></DialogHeader><form onSubmit={e=>{e.preventDefault();const key=keyDraft.trim();if(!key.startsWith("sk-or-")||key.length<20)return;const task=pendingAction.current;setApiKey(key);setKeyOpen(false);setKeyDraft("");pendingAction.current=null;if(task)void run(task,key);}}><label htmlFor="api-key" className="field-label">API 密钥</label><input className="secret-input" id="api-key" type="password" autoComplete="off" value={keyDraft} placeholder="sk-or-v1-…" onChange={e=>setKeyDraft(e.target.value)} maxLength={200} required/><p className="helper">需要 sk-or- 开头的密钥。页面不保存密钥；免费端点不可用时会停止请求。</p><div className="flex gap-2 justify-end mt-5">{apiKey&&<Button type="button" variant="ghost" onClick={()=>{setApiKey("");setKeyDraft("");setKeyOpen(false);}}>清除密钥</Button>}<Button type="submit" disabled={!keyDraft.trim().startsWith("sk-or-")||keyDraft.trim().length<20}>{pendingAction.current?"连接并继续":"连接"}</Button></div></form></DialogContent></Dialog>
+    <Dialog open={keyOpen} onOpenChange={open=>{setKeyOpen(open);if(!open){pendingAction.current=null;setKeyDraft("");}}}><DialogContent><DialogHeader><DialogTitle>连接 OpenRouter</DialogTitle><DialogDescription className="leading-6">输入你的 OpenRouter API 密钥。密钥只用于本次会话，{staticDeployment?"从浏览器直接发送到 OpenRouter":"通过本站服务端转发到 OpenRouter"}。</DialogDescription></DialogHeader><form onSubmit={e=>{e.preventDefault();const key=keyDraft.trim();if(!key.startsWith("sk-or-")||key.length<20)return;const task=pendingAction.current;setApiKey(key);setKeyOpen(false);setKeyDraft("");pendingAction.current=null;if(task)void run(task,key);}}><label htmlFor="api-key" className="field-label">API 密钥</label><input className="secret-input" id="api-key" type="password" autoComplete="off" value={keyDraft} placeholder="sk-or-v1-…" onChange={e=>setKeyDraft(e.target.value)} maxLength={200} required/><p className="helper">需要 sk-or- 开头的密钥。页面不保存密钥；免费端点不可用时会停止请求。</p><div className="flex gap-2 justify-end mt-5">{apiKey&&<Button type="button" variant="ghost" onClick={()=>{setApiKey("");setKeyDraft("");setKeyOpen(false);}}>清除密钥</Button>}<Button type="submit" disabled={!keyDraft.trim().startsWith("sk-or-")||keyDraft.trim().length<20}>{pendingAction.current?"连接并继续":"连接"}</Button></div></form></DialogContent></Dialog>
     <Dialog open={!!zoom} onOpenChange={open=>{if(!open)setZoom(null);}}><DialogContent className="sm:max-w-[900px] max-h-[92vh] overflow-auto"><DialogHeader><DialogTitle>{zoom?.label||zoom?.filename}</DialogTitle><DialogDescription>{zoom?.width} × {zoom?.height} · PNG{zoom?.alpha?" · Alpha":""}</DialogDescription></DialogHeader>{zoom&&<div className={zoom.alpha?"checkerboard rounded-lg":"bg-[#f4f5f7] rounded-lg"}><img className="max-h-[70vh] max-w-full mx-auto object-contain" src={zoom.url} alt={zoom.label||"输出图片放大预览"}/></div>}<Button variant="outline" onClick={()=>zoom&&void download(zoom)}><Download size={16}/>下载 PNG</Button></DialogContent></Dialog>
   </>;
 }
