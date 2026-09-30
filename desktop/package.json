@@ -1,0 +1,47 @@
+{
+  "name": "ming-image-studio-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ming Image Studio Windows desktop application",
+  "author": "sggg221",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test security.test.cjs",
+    "pack": "electron-builder --win --x64 --dir --publish never",
+    "dist": "npm run dist:win",
+    "dist:win": "electron-builder --win --x64 --publish never",
+    "verify:package": "node verify-package.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "chat.mingimagestudio.app",
+    "productName": "Ming Image Studio",
+    "asar": true,
+    "npmRebuild": false,
+    "directories": { "output": "../releases", "buildResources": "assets" },
+    "files": ["main.cjs", "security.cjs", "package.json", "assets/icon.png"],
+    "extraResources": [{ "from": "../dist/desktop", "to": "studio", "filter": ["**/*"] }],
+    "win": {
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "target": [{ "target": "nsis", "arch": ["x64"] }, { "target": "zip", "arch": ["x64"] }],
+      "artifactName": "Ming-Image-Studio-${version}-win-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Ming Image Studio",
+      "uninstallDisplayName": "Ming Image Studio",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Ming-Image-Studio-${version}-win-${arch}-Setup.${ext}"
+    },
+    "publish": null
+  }
+}

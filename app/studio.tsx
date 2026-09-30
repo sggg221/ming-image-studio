@@ -36,7 +36,9 @@ async function requestStaticImages(task: Mode, prompt: string, image: string | u
       headers: {
         Authorization: `Bearer ${key}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": window.location.href,
+        "HTTP-Referer": window.location.protocol === "mingstudio:"
+          ? "https://sggg221.github.io/ming-image-studio/"
+          : window.location.href,
         "X-Title": "Ming Image Studio",
       },
       body: JSON.stringify(payload),

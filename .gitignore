@@ -46,3 +46,5 @@ next-env.d.ts
 /work/
 *.tsbuildinfo
 /.learnings/
+/desktop/node_modules/
+/releases/

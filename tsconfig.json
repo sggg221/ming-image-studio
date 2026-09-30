@@ -42,7 +42,8 @@
   ],
   "exclude": [
     "node_modules",
+    "desktop/node_modules",
+    "releases",
     "examples"
   ]
 }
-

@@ -1,0 +1,141 @@
+name: Build Windows desktop app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/desktop.yml"
+      - "desktop/**"
+      - "vite.desktop.config.ts"
+      - "scripts/desktop.mjs"
+      - "app/**"
+      - "lib/**"
+      - "pages/**"
+      - "components/**"
+      - "public/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "postcss.config.*"
+
+permissions:
+  contents: read
+
+# Serialize publication so two runs cannot create the same version together.
+concurrency:
+  group: ming-image-studio-desktop
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.package-info.outputs.version }}
+      artifact: ${{ steps.package-info.outputs.artifact }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Install desktop dependencies
+        run: npm ci --prefix desktop
+      - name: Test desktop security boundaries
+        run: npm --prefix desktop test
+      - name: Package Windows x64 installer and ZIP
+        run: npm run package:desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Verify packaged application and bundled resources
+        run: npm run verify:package --prefix desktop
+      - name: Verify packages
+        id: package-info
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath desktop/package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Desktop version must be a stable semantic version." }
+          $installer = "releases/Ming-Image-Studio-$version-win-x64-Setup.exe"
+          $archive = "releases/Ming-Image-Studio-$version-win-x64.zip"
+          foreach ($package in @($installer, $archive)) {
+            if (!(Test-Path -LiteralPath $package -PathType Leaf)) { throw "Missing package: $package" }
+            if ((Get-Item -LiteralPath $package).Length -lt 1MB) { throw "Package is incomplete: $package" }
+            Get-FileHash -LiteralPath $package -Algorithm SHA256 | Format-List
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "artifact=ming-image-studio-windows-x64-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package-info.outputs.artifact }}
+          path: |
+            releases/Ming-Image-Studio-*-win-x64-Setup.exe
+            releases/Ming-Image-Studio-*-win-x64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    runs-on: windows-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download verified packages from this run
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: ${{ needs.build.outputs.artifact }}
+        run: |
+          gh run download "$env:GITHUB_RUN_ID" --repo "$env:GITHUB_REPOSITORY" --name "$env:ARTIFACT_NAME" --dir releases
+          if ($LASTEXITCODE -ne 0) { throw "Could not download the build artifact." }
+      - name: Publish this version if it has no release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $version = $env:DESKTOP_VERSION
+          $tag = "desktop-v$version"
+          $existing = gh release view "$tag" --repo "$env:GITHUB_REPOSITORY" --json tagName,isDraft 2> release-check-error.txt
+          if ($LASTEXITCODE -eq 0) {
+            if (($existing | ConvertFrom-Json).isDraft) {
+              throw "Release $tag is still a draft from an earlier attempt. Its assets were preserved; inspect the draft before publishing or choose a new version."
+            }
+            Write-Output "Release $tag already exists; keeping its tag, notes, and assets unchanged."
+            exit 0
+          }
+          $releaseError = Get-Content -LiteralPath release-check-error.txt -Raw
+          if ($releaseError -notmatch 'release not found|HTTP 404|Not Found') {
+            throw "Could not check existing releases: $releaseError"
+          }
+          $installer = "releases/Ming-Image-Studio-$version-win-x64-Setup.exe"
+          $archive = "releases/Ming-Image-Studio-$version-win-x64.zip"
+          foreach ($package in @($installer, $archive)) {
+            if (!(Test-Path -LiteralPath $package -PathType Leaf)) { throw "Missing release asset: $package" }
+          }
+          @'
+          Ming Image Studio Windows 桌面版（x64）。
+
+          - Design：文字生成设计图。
+          - Design-Layer：上传图片并拆成独立图层。
+          - 包含图层预览、PNG 下载和图层 ZIP 导出。
+
+          使用方式：安装 Setup.exe，或完整解压 ZIP 后打开 Ming Image Studio.exe。
+          生成和拆层需要联网，并在软件内填写自己的 OpenRouter API 密钥。密钥仅保留在当前会话内存，关闭软件后清除。
+
+          此版本尚未进行代码签名，Windows 可能显示未知发布者提示。
+          '@ | Set-Content -LiteralPath release-notes.md -Encoding utf8NoBOM
+          gh release create "$tag" "$installer" "$archive" --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" --title "Ming Image Studio $version · Windows" --notes-file release-notes.md --draft
+          if ($LASTEXITCODE -ne 0) { throw "Draft release creation or asset upload failed; no incomplete release was published." }
+          gh release edit "$tag" --repo "$env:GITHUB_REPOSITORY" --draft=false
+          if ($LASTEXITCODE -ne 0) { throw "Publishing failed; the release remains a draft with its uploaded assets preserved." }
