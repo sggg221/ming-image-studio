@@ -36,6 +36,8 @@ h1 { font-size: 28px; font-weight: 650; letter-spacing: -.8px; line-height: 1.4;
 .form-field { margin-top: 22px; }
 .field-label { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-weight: 550; font-size: 14px; }
 .editor { width: 100%; display: block; border: 1px solid #d8dfe9; border-radius: 9px; padding: 12px; font-size: 14px; line-height: 1.7; resize: vertical; outline: none; min-height: 140px; }
+#prompt { min-height: 290px; }
+#roles { min-height: 180px; }
 .editor:focus, .secret-input:focus { border-color: #245bdf; box-shadow: 0 0 0 3px #245bdf14; }
 .helper { font-size: 12px; color: #778190; line-height: 1.7; margin-top: 8px; }
 .source-box { position: relative; border: 1px dashed #cbd4e2; border-radius: 10px; background: #f8f9fb; min-height: 154px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
@@ -66,4 +68,3 @@ h1 { font-size: 28px; font-weight: 650; letter-spacing: -.8px; line-height: 1.4;
 .empty-state { min-height: 430px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: #8a96a8; }
 @media(max-width:1100px) { .studio-shell {padding:28px 22px;} .studio-header {padding:0 22px;} .work-grid {grid-template-columns:320px minmax(0,1fr); gap:16px;} .layer-grid {grid-template-columns:repeat(2,minmax(0,1fr));} }
 @media(max-width:760px) { .studio-header {height:68px;padding:0 16px;} .brand {font-size:16px;gap:8px;} .studio-shell {padding:24px 16px;} .intro {display:block;} h1 {font-size:25px;} .work-grid {grid-template-columns:1fr;} .control-panel {padding:20px;} .result-header {padding:16px; flex-wrap:wrap;} .layer-grid {padding:14px;gap:12px;} .layer-preview {height:220px;} .canvas {padding:16px;min-height:350px;} .design-image {max-height:570px;} .stats {padding:14px 16px;gap:10px;} }
-

@@ -7,7 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { downloadImage, downloadZip } from "@/lib/download";
-import { checkFreeProvider, IMAGE_API, MODELS, providerError } from "@/lib/ming";
+import { checkFreeProvider, IMAGE_API, isValidApiKey, MODELS, providerError } from "@/lib/ming";
 
 type Mode = "generate" | "layers";
 type OutputImage = {url: string; filename: string; width: number; height: number; alpha: boolean; label?: string};
@@ -19,8 +19,7 @@ const labels = ["文字与数字", "手与充电盒", "模特头部", "模特与
 const sampleDesign: Result = {images: [{url: "examples/earbuds-design.png", filename: "ming-design.png", width: 1440, height: 2560, alpha: false}], elapsed: 36.959, cost: 0, sample: true};
 const sampleLayers: Result = {images: labels.map((label, i) => ({url: `examples/earbuds-layer-${i+1}.png`, filename: `layer-${String(i+1).padStart(2,"0")}.png`, width:768, height:1365, alpha:true, label})), elapsed:54.229, cost:0, sample:true};
 
-const staticDeployment = typeof window !== "undefined" &&
-  (window.location.hostname.endsWith(".github.io") || window.location.pathname.startsWith("/ming-image-studio"));
+const staticDeployment = process.env.NEXT_PUBLIC_DIRECT_API === "1";
 
 type ImageResponse = {error?: string; images: {b64: string; filename: string; width: number; height: number; alpha: boolean}[]; elapsed: number; cost: number | null};
 
@@ -30,23 +29,37 @@ async function requestStaticImages(task: Mode, prompt: string, image: string | u
   const payload: Record<string, unknown> = {model, prompt, output_format: "png", provider: {only: [provider], allow_fallbacks: false}};
   if (task === "layers") payload.input_references = [{type: "image_url", image_url: {url: image}}];
   const started = Date.now();
-  const response = await fetch(IMAGE_API, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": window.location.href,
-      "X-Title": "Ming Image Studio",
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(600000),
-  });
+  let response: Response;
+  try {
+    response = await fetch(IMAGE_API, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": window.location.href,
+        "X-Title": "Ming Image Studio",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(600000),
+    });
+  } catch {
+    throw new Error("与 OpenRouter 的连接中断，是否提交成功暂时未知。请先查看平台请求记录，避免立即重复提交。");
+  }
   if (!response.ok) throw new Error(providerError(response.status));
+  const maxResponseSize = 40 * 1024 * 1024;
+  if (Number(response.headers.get("content-length")) > maxResponseSize) throw new Error("模型返回的数据过大，请到 OpenRouter 查看结果。");
+  let raw: string;
+  try {raw = await response.text();} catch {
+    throw new Error("接收模型结果时连接中断，请先查看 OpenRouter 请求记录，避免立即重复提交。");
+  }
+  if (raw.length > maxResponseSize) throw new Error("模型返回的数据过大，请到 OpenRouter 查看结果。");
   let data: {error?: {code?: unknown}; data?: {b64_json?: unknown}[]; usage?: {cost?: unknown; cost_usd?: unknown}};
-  try {data = await response.json();} catch {throw new Error("模型没有返回有效的图片数据，请稍后重试。");}
+  try {data = JSON.parse(raw);} catch {throw new Error("模型没有返回有效的图片数据，请先到 OpenRouter 查看请求记录。");}
+  if (!data || typeof data !== "object") throw new Error("模型没有返回有效的图片数据，请先到 OpenRouter 查看请求记录。");
   if (data.error) throw new Error(providerError(Number(data.error.code) || 502));
   if (!Array.isArray(data.data) || !data.data.length || data.data.length > 9) throw new Error("模型未返回可用图片，请到 OpenRouter 查看请求记录。");
   const images = data.data.map((item, index) => {
+    if (!item || typeof item !== "object") throw new Error("模型返回了无效图片，请到 OpenRouter 查看请求记录。");
     const b64 = item.b64_json;
     if (typeof b64 !== "string" || b64.length < 44 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64) || b64.length % 4 !== 0) throw new Error("模型返回了无效图片。");
     const first = atob(b64.slice(0, 44));
@@ -107,6 +120,8 @@ export default function Studio() {
   const stateRef = useRef({mode, prompt, busy, results});
   stateRef.current = {mode, prompt, busy, results};
   const result = results[mode];
+  const layerDimensionsDiffer = mode === "layers" && result.images.some(image => image.width !== result.images[0].width || image.height !== result.images[0].height);
+  const layersWithoutAlpha = mode === "layers" ? result.images.flatMap((image, index) => image.alpha ? [] : [index + 1]) : [];
 
   useEffect(() => () => objectUrls.current.forEach(url => URL.revokeObjectURL(url)), []);
   useEffect(() => {
@@ -163,6 +178,7 @@ export default function Studio() {
     if (task === "layers" && !source) {setError("请先上传或选择一张图片。"); return;}
     const key = explicitKey ?? apiKey;
     if (!key) {pendingAction.current=task; setKeyOpen(true); return;}
+    if (!isValidApiKey(key)) {setError("请配置有效的 OpenRouter API 密钥。"); return;}
     busyRef.current=true; setBusy(true);
     let createdUrls: string[]=[];
     try {
@@ -203,7 +219,7 @@ export default function Studio() {
   return <>
     <header className="studio-header">
       <div className="brand"><span className="brand-mark"><Layers3 size={22}/></span>Ming Image Studio</div>
-      <div className="flex items-center gap-3"><span className="hidden sm:inline-flex badge"><LockKeyhole size={12}/>私人工作台</span><Button variant="outline" size="sm" onClick={openKey} disabled={busy}><KeyRound size={15}/>{apiKey?"密钥已配置":"连接 OpenRouter"}</Button></div>
+      <div className="flex items-center gap-3"><span className="hidden sm:inline-flex badge"><LockKeyhole size={12}/>会话密钥</span><Button variant="outline" size="sm" onClick={openKey} disabled={busy}><KeyRound size={15}/>{apiKey?"密钥已配置":"连接 OpenRouter"}</Button></div>
     </header>
     <main className="studio-shell">
       <div className="intro"><div><h1>生图与图层拆分</h1><p className="subtitle">从设计想法到透明图层，在一个工作台里完成。</p></div><span className="badge hidden md:inline-flex">两个模型 · 一个工作流</span></div>
@@ -219,7 +235,7 @@ export default function Studio() {
                 <div className="form-field"><label className="field-label" htmlFor="prompt">设计提示词<span className="font-normal text-xs text-[#8a96a8]">{prompt.length} / 12000</span></label><textarea id="prompt" className="editor min-h-[290px]" value={prompt} maxLength={12000} onChange={e=>setPrompt(e.target.value)} disabled={busy}/><p className="helper">描述主体、构图、配色和需要精确呈现的文字。</p></div>
                 <div className="form-field"><label className="field-label" htmlFor="ratio">画幅比例</label><Select value={ratio} onValueChange={setRatio} disabled={busy}><SelectTrigger id="ratio" className="w-full"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="auto">由模型决定</SelectItem><SelectItem value="1:1">1:1 · 方形</SelectItem><SelectItem value="9:16">9:16 · 竖版</SelectItem><SelectItem value="16:9">16:9 · 横版</SelectItem></SelectContent></Select><p className="helper">比例会写入提示词，最终尺寸由模型返回。</p></div>
               </> : <>
-                <div className="form-field"><label className="field-label">原始图片{source&&<button className="text-xs text-[#245bdf]" disabled={busy} onClick={()=>fileInput.current?.click()}>更换图片</button>}</label><div className={`source-box ${dragging?"dragging":""}`} onDragOver={e=>{e.preventDefault();setDragging(true);}} onDragLeave={()=>setDragging(false)} onDrop={e=>{e.preventDefault();setDragging(false);void selectFile(e.dataTransfer.files[0]);}}>{source?<img src={source.url} alt="待拆分的原始图片"/>:<button className="source-empty" disabled={busy} onClick={()=>fileInput.current?.click()}><Upload size={24}/><span className="text-sm">点击上传，或拖入图片</span></button>}</div><input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={e=>{void selectFile(e.target.files?.[0]);e.target.value="";}}/><div className="helper flex justify-between gap-2">{source?<><span className="source-name" title={source.name}>{source.name}</span><span>{source.width} × {source.height}</span></>:<span>PNG / JPG / WebP，最大 10 MB</span>}</div></div>
+                <div className="form-field"><label className="field-label">原始图片{source&&<button className="text-xs text-[#245bdf]" aria-label="更换原始图片" disabled={busy} onClick={()=>fileInput.current?.click()}>更换图片</button>}</label><div className={`source-box ${dragging?"dragging":""}`} onDragOver={e=>{e.preventDefault();setDragging(true);}} onDragLeave={()=>setDragging(false)} onDrop={e=>{e.preventDefault();setDragging(false);void selectFile(e.dataTransfer.files[0]);}}>{source?<img src={source.url} alt="待拆分的原始图片"/>:<button className="source-empty" disabled={busy} onClick={()=>fileInput.current?.click()}><Upload size={24}/><span className="text-sm">点击上传，或拖入图片</span></button>}</div><input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={e=>{void selectFile(e.target.files?.[0]);e.target.value="";}}/><div className="helper flex justify-between gap-2">{source?<><span className="source-name" title={source.name}>{source.name}</span><span>{source.width} × {source.height}</span></>:<span>PNG / JPG / WebP，最大 10 MB</span>}</div></div>
                 <div className="form-field"><label className="field-label" htmlFor="layer-count">目标图层数</label><Select value={count} onValueChange={setCount} disabled={busy}><SelectTrigger id="layer-count" className="w-full"><SelectValue/></SelectTrigger><SelectContent>{[2,3,4,5,6,7,8,9].map(n=><SelectItem key={n} value={String(n)}>{n} 层</SelectItem>)}</SelectContent></Select></div>
                 <div className="form-field"><label className="field-label" htmlFor="roles">拆分要求</label><textarea id="roles" className="editor min-h-[180px]" value={roles} maxLength={9000} onChange={e=>setRoles(e.target.value)} disabled={busy}/><p className="helper">按视觉角色填写。实际层数、尺寸与边界可能与要求不同；修改层数时请同步调整要求。</p></div>
               </>}
@@ -229,9 +245,11 @@ export default function Studio() {
               {error&&<div className="status-box status-error" role="alert"><CircleAlert className="mt-1 shrink-0" size={16}/>{error}</div>}
             </section>
             <section className="panel" aria-label="模型输出">
-              <div className="result-header"><div className="flex items-center gap-3"><h2 className="result-title">{mode==="generate"?"设计预览":"透明图层"}</h2><span className="badge">{result.sample?"实测示例":"本次结果"}{mode==="layers"?` · ${result.images.length} 层`:""}</span></div><div className="flex items-center gap-2">{mode==="generate"?<><Button variant="outline" size="sm" disabled={busy} onClick={()=>useForLayers(result.images[0])}>送去拆层<ArrowRight size={14}/></Button><Button variant="ghost" size="sm" onClick={()=>void download(result.images[0])} aria-label="下载原图"><Download size={16}/></Button></>:<Button variant="outline" size="sm" disabled={zipBusy} onClick={()=>void zip()}>{zipBusy?<LoaderCircle size={15} className="animate-spin"/>:<Download size={15}/>}下载全部</Button>}</div></div>
-              {mode==="generate"?<div className="canvas"><button className="canvas-button" onClick={()=>setZoom(result.images[0])} aria-label="放大设计图"><img className="design-image" src={result.images[0].url} alt="Ming Design 生成的无线耳机广告或本次设计图"/></button></div>:<div className="layer-grid">{result.images.map((image,i)=><div className="layer-card" key={image.url}><button className="layer-preview checkerboard" onClick={()=>setZoom(image)} aria-label={`放大图层 ${i+1}`}><img src={image.url} alt={image.label||`透明图层 ${i+1}`}/></button><div className="layer-card-footer"><span>{String(i+1).padStart(2,"0")} · {image.label||"透明图层"}</span><Button size="icon" variant="ghost" className="size-7" aria-label={`下载图层 ${i+1}`} onClick={()=>void download(image)}><Download size={14}/></Button></div></div>)}</div>}
-              <div className="stats"><span>尺寸<b>{result.images[0].width} × {result.images[0].height}</b></span><span>API 往返<b>{result.elapsed.toFixed(1)} s</b></span><span>API 报告费用<b>{result.cost===null?"未报告":`$${result.cost}`}</b></span><span>格式<b>{result.images.every(image=>image.alpha)?"PNG · Alpha":"PNG"}</b></span></div>
+              <div className="result-header"><div className="flex items-center gap-3"><h2 className="result-title">{mode==="generate"?"设计预览":"图层预览"}</h2><span className="badge">{result.sample?"实测示例":"本次结果"}{mode==="layers"?` · ${result.images.length} 层`:""}</span></div><div className="flex items-center gap-2">{mode==="generate"?<><Button variant="outline" size="sm" disabled={busy} onClick={()=>useForLayers(result.images[0])}>送去拆层<ArrowRight size={14}/></Button><Button variant="ghost" size="sm" onClick={()=>void download(result.images[0])} aria-label="下载原图"><Download size={16}/></Button></>:<Button variant="outline" size="sm" disabled={zipBusy} onClick={()=>void zip()}>{zipBusy?<LoaderCircle size={15} className="animate-spin"/>:<Download size={15}/>}下载全部</Button>}</div></div>
+              {mode==="generate"?<div className="canvas"><button className="canvas-button" onClick={()=>setZoom(result.images[0])} aria-label="放大设计图"><img className="design-image" src={result.images[0].url} alt="Ming Design 生成的无线耳机广告或本次设计图"/></button></div>:<div className="layer-grid">{result.images.map((image,i)=><div className="layer-card" key={image.url}><button className="layer-preview checkerboard" onClick={()=>setZoom(image)} aria-label={`放大图层 ${i+1}`}><img src={image.url} alt={image.label||`图层 ${i+1}`}/></button><div className="layer-card-footer"><span>{String(i+1).padStart(2,"0")} · {image.label||"图层"}</span><Button size="icon" variant="ghost" className="size-7" aria-label={`下载图层 ${i+1}`} onClick={()=>void download(image)}><Download size={14}/></Button></div></div>)}</div>}
+              <div className="stats"><span>尺寸<b>{layerDimensionsDiffer ? "图层尺寸不一致" : `${result.images[0].width} × ${result.images[0].height}`}</b></span><span>API 往返<b>{result.elapsed.toFixed(1)} s</b></span><span>API 报告费用<b>{result.cost===null?"未报告":`$${result.cost}`}</b></span><span>格式<b>{result.images.every(image=>image.alpha)?"PNG · 含 Alpha 通道":result.images.some(image=>image.alpha)?"PNG · 部分含 Alpha":"PNG"}</b></span></div>
+              {layerDimensionsDiffer&&<p className="px-6 pb-4 text-xs text-[#778190] leading-6" role="status">返回图层的画布尺寸不一致，叠加编辑前请对齐画布。所有返回文件均可下载。</p>}
+              {layersWithoutAlpha.length>0&&<p className="px-6 pb-4 text-xs text-[#778190] leading-6" role="status">第 {layersWithoutAlpha.join("、")} 层未检测到独立 Alpha 通道，透明效果请下载后确认。所有返回文件均可下载。</p>}
               {mode==="layers"&&result.sample&&<p className="px-6 pb-4 text-xs text-[#778190] leading-6">示例返回 6 层，头部与服饰层存在部分重叠。棋盘格仅用于预览透明区域。</p>}
             </section>
           </div>
@@ -239,8 +257,7 @@ export default function Studio() {
       </Tabs>
       <footer className="studio-footer"><span>密钥仅保留在当前页面内存，刷新后清除。</span><div className="flex gap-5"><a href="https://openrouter.ai/inclusionai/ming-image-0.1-design" target="_blank" rel="noreferrer">Design 模型 ↗</a><a href="https://openrouter.ai/inclusionai/ming-image-0.1-design-layer" target="_blank" rel="noreferrer">Design-Layer 模型 ↗</a></div></footer>
     </main>
-    <Dialog open={keyOpen} onOpenChange={open=>{setKeyOpen(open);if(!open){pendingAction.current=null;setKeyDraft("");}}}><DialogContent><DialogHeader><DialogTitle>连接 OpenRouter</DialogTitle><DialogDescription className="leading-6">输入你的 OpenRouter API 密钥。密钥只用于本次会话，{staticDeployment?"从浏览器直接发送到 OpenRouter":"通过本站服务端转发到 OpenRouter"}。</DialogDescription></DialogHeader><form onSubmit={e=>{e.preventDefault();const key=keyDraft.trim();if(!key.startsWith("sk-or-")||key.length<20)return;const task=pendingAction.current;setApiKey(key);setKeyOpen(false);setKeyDraft("");pendingAction.current=null;if(task)void run(task,key);}}><label htmlFor="api-key" className="field-label">API 密钥</label><input className="secret-input" id="api-key" type="password" autoComplete="off" value={keyDraft} placeholder="sk-or-v1-…" onChange={e=>setKeyDraft(e.target.value)} maxLength={200} required/><p className="helper">需要 sk-or- 开头的密钥。页面不保存密钥；免费端点不可用时会停止请求。</p><div className="flex gap-2 justify-end mt-5">{apiKey&&<Button type="button" variant="ghost" onClick={()=>{setApiKey("");setKeyDraft("");setKeyOpen(false);}}>清除密钥</Button>}<Button type="submit" disabled={!keyDraft.trim().startsWith("sk-or-")||keyDraft.trim().length<20}>{pendingAction.current?"连接并继续":"连接"}</Button></div></form></DialogContent></Dialog>
+    <Dialog open={keyOpen} onOpenChange={open=>{setKeyOpen(open);if(!open){pendingAction.current=null;setKeyDraft("");}}}><DialogContent><DialogHeader><DialogTitle>连接 OpenRouter</DialogTitle><DialogDescription className="leading-6">输入你的 OpenRouter API 密钥。密钥只用于本次会话，{staticDeployment?"从浏览器直接发送到 OpenRouter":"通过本站服务端转发到 OpenRouter"}。</DialogDescription></DialogHeader><form onSubmit={e=>{e.preventDefault();const key=keyDraft.trim();if(!isValidApiKey(key))return;const task=pendingAction.current;setApiKey(key);setKeyOpen(false);setKeyDraft("");pendingAction.current=null;if(task)void run(task,key);}}><label htmlFor="api-key" className="field-label">API 密钥</label><input className="secret-input" id="api-key" type="password" autoComplete="off" value={keyDraft} placeholder="sk-or-v1-…" onChange={e=>setKeyDraft(e.target.value)} maxLength={196} required/><p className="helper">需要 sk-or- 开头的密钥。页面不保存密钥；免费端点不可用时会停止请求。</p><div className="flex gap-2 justify-end mt-5">{apiKey&&<Button type="button" variant="ghost" onClick={()=>{setApiKey("");setKeyDraft("");setKeyOpen(false);}}>清除密钥</Button>}<Button type="submit" disabled={!isValidApiKey(keyDraft.trim())}>{pendingAction.current?"连接并继续":"连接"}</Button></div></form></DialogContent></Dialog>
     <Dialog open={!!zoom} onOpenChange={open=>{if(!open)setZoom(null);}}><DialogContent className="sm:max-w-[900px] max-h-[92vh] overflow-auto"><DialogHeader><DialogTitle>{zoom?.label||zoom?.filename}</DialogTitle><DialogDescription>{zoom?.width} × {zoom?.height} · PNG{zoom?.alpha?" · Alpha":""}</DialogDescription></DialogHeader>{zoom&&<div className={zoom.alpha?"checkerboard rounded-lg":"bg-[#f4f5f7] rounded-lg"}><img className="max-h-[70vh] max-w-full mx-auto object-contain" src={zoom.url} alt={zoom.label||"输出图片放大预览"}/></div>}<Button variant="outline" onClick={()=>zoom&&void download(zoom)}><Download size={16}/>下载 PNG</Button></DialogContent></Dialog>
   </>;
 }
-

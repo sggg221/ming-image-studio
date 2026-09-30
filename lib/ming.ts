@@ -4,17 +4,27 @@ export const MODELS = {
 } as const;
 export const IMAGE_API = "https://openrouter.ai/api/v1/images";
 
+export function isValidApiKey(value: string) {
+  return /^sk-or-[A-Za-z0-9_-]{16,190}$/.test(value);
+}
+
 function zeroPrice(value: unknown) {
   return (typeof value === "number" && Number.isFinite(value) && value === 0) ||
     (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value)) && Number(value) === 0);
 }
 
 export async function checkFreeProvider(model: string) {
-  const response = await fetch(`${IMAGE_API}/models/${model}/endpoints`, {signal: AbortSignal.timeout(20000), cache:"no-store", redirect:"manual"});
-  if (!response.ok) throw new Error("暂时无法确认模型价格，请稍后重试。");
-  const data = await response.json() as {endpoints?: {provider_tag?:string;pricing?:{cost_usd?:unknown}[]}[]};
-  const endpoints = data.endpoints?.filter(e => e.provider_tag === "novita") ?? [];
-  if (!endpoints.length || !endpoints.every(e=>Array.isArray(e.pricing) && e.pricing.length>0 && e.pricing.every(p=>zeroPrice(p.cost_usd)))) {
+  let endpoints: {provider_tag?:string;pricing?:{cost_usd?:unknown}[]}[];
+  try {
+    const response = await fetch(`${IMAGE_API}/models/${model}/endpoints`, {signal: AbortSignal.timeout(20000), cache:"no-store", redirect:"manual"});
+    if (!response.ok) throw new Error("price_check_failed");
+    const data = await response.json() as {endpoints?: {provider_tag?:string;pricing?:{cost_usd?:unknown}[]}[]};
+    if (!Array.isArray(data.endpoints)) throw new Error("invalid_price_response");
+    endpoints = data.endpoints.filter(e => e?.provider_tag === "novita");
+  } catch {
+    throw new Error("暂时无法确认模型价格，未提交生成请求。请检查网络连接后重试。");
+  }
+  if (!endpoints.length || !endpoints.every(e=>Array.isArray(e.pricing) && e.pricing.length>0 && e.pricing.every(p=>p && zeroPrice(p.cost_usd)))) {
     throw new Error("当前未找到可确认免费的 Novita 端点，已停止提交。请到 OpenRouter 查看模型可用状态。");
   }
   return "novita";
@@ -35,4 +45,3 @@ export function providerError(status: number) {
   };
   return messages[status] ?? "模型请求未成功，请稍后再试或查看 OpenRouter 请求记录。";
 }
-
